@@ -1,4 +1,6 @@
 import os,sys
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 parent_directory = os.path.dirname(os.path.abspath(__file__))
 import logging,pdb
 logger = logging.getLogger(__name__)
@@ -118,85 +120,40 @@ class AudioPre:
         if is_hp3 == True:
             ins_root,vocal_root = vocal_root,ins_root
 
+        def save_stem(spec, root, head):
+            # Only read shared spectra/parameters; all reconstruction buffers
+            # remain local. Do not use spectrogram_to_wave_mt's global buffers.
+            if self.data["high_end_process"].startswith("mirroring"):
+                high_end = spec_utils.mirroring(
+                    self.data["high_end_process"], spec, input_high_end, self.mp
+                )
+                wave = spec_utils.cmb_spectrogram_to_wave(
+                    spec, self.mp, input_high_end_h, high_end
+                )
+            else:
+                wave = spec_utils.cmb_spectrogram_to_wave(spec, self.mp)
+            output_format = format if format in ("wav", "flac") else "wav"
+            path = os.path.join(root, head + "{}_{}.{}".format(name, self.data["agg"], output_format))
+            sf.write(path, np.array(wave).astype("float32"), self.mp.param["sr"])
+            if format not in ("wav", "flac"):
+                target = os.path.splitext(path)[0] + "." + format
+                subprocess.run(
+                    ["ffmpeg", "-i", path, "-vn", target, "-q:a", "2", "-y"],
+                    check=True,
+                )
+                os.remove(path)
+            logger.info("%s %s done", name, head.rstrip("_"))
+
+        stems = []
         if ins_root is not None:
-            if self.data["high_end_process"].startswith("mirroring"):
-                input_high_end_ = spec_utils.mirroring(
-                    self.data["high_end_process"], y_spec_m, input_high_end, self.mp
-                )
-                wav_instrument = spec_utils.cmb_spectrogram_to_wave(
-                    y_spec_m, self.mp, input_high_end_h, input_high_end_
-                )
-            else:
-                wav_instrument = spec_utils.cmb_spectrogram_to_wave(y_spec_m, self.mp)
-            logger.info("%s instruments done" % name)
-            if is_hp3 == True:
-                head = "vocal_"
-            else:
-                head = "instrument_"
-            if format in ["wav", "flac"]:
-                sf.write(
-                    os.path.join(
-                        ins_root,
-                        head + "{}_{}.{}".format(name, self.data["agg"], format),
-                    ),
-                    (np.array(wav_instrument)).astype("float32"),
-                    self.mp.param["sr"],
-                )  #
-            else:
-                path = os.path.join(
-                    ins_root, head + "{}_{}.wav".format(name, self.data["agg"])
-                )
-                sf.write(
-                    path,
-                    (np.array(wav_instrument)).astype("float32"),
-                    self.mp.param["sr"],
-                )
-                if os.path.exists(path):
-                    opt_format_path = path[:-4] + ".%s" % format
-                    os.system("ffmpeg -i %s -vn %s -q:a 2 -y" % (path, opt_format_path))
-                    if os.path.exists(opt_format_path):
-                        try:
-                            os.remove(path)
-                        except:
-                            pass
+            stems.append((y_spec_m, ins_root, "vocal_" if is_hp3 else "instrument_"))
         if vocal_root is not None:
-            if is_hp3 == True:
-                head = "instrument_"
-            else:
-                head = "vocal_"
-            if self.data["high_end_process"].startswith("mirroring"):
-                input_high_end_ = spec_utils.mirroring(
-                    self.data["high_end_process"], v_spec_m, input_high_end, self.mp
-                )
-                wav_vocals = spec_utils.cmb_spectrogram_to_wave(
-                    v_spec_m, self.mp, input_high_end_h, input_high_end_
-                )
-            else:
-                wav_vocals = spec_utils.cmb_spectrogram_to_wave(v_spec_m, self.mp)
-            logger.info("%s vocals done" % name)
-            if format in ["wav", "flac"]:
-                sf.write(
-                    os.path.join(
-                        vocal_root,
-                        head + "{}_{}.{}".format(name, self.data["agg"], format),
-                    ),
-                    (np.array(wav_vocals)).astype("float32"),
-                    self.mp.param["sr"],
-                )
-            else:
-                path = os.path.join(
-                    vocal_root, head + "{}_{}.wav".format(name, self.data["agg"])
-                )
-                sf.write(
-                    path,
-                    (np.array(wav_vocals)).astype("float32"),
-                    self.mp.param["sr"],
-                )
-                if os.path.exists(path):
-                    opt_format_path = path[:-4] + ".%s" % format
-                    os.system("ffmpeg -i %s -vn %s -q:a 2 -y" % (path, opt_format_path))
-                    if os.path.exists(opt_format_path):
-                        try:
-                            os.remove(path)
-                        except:
-                            pass
+            stems.append((v_spec_m, vocal_root, "instrument_" if is_hp3 else "vocal_"))
+        if len(stems) == 2 and os.environ.get("UVR_RECONSTRUCTION_WORKERS", "2") != "1":
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="uvr-reconstruct") as pool:
+                futures = [pool.submit(save_stem, *stem) for stem in stems]
+                for future in futures:
+                    future.result()  # Surface failures before callers can cache the pair.
+        else:
+            for stem in stems:
+                save_stem(*stem)

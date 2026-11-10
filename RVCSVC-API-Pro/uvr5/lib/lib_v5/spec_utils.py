@@ -408,7 +408,7 @@ def cmb_spectrogram_to_wave(spec_m, mp, extra_bins_h=None, extra_bins=None):
                     ),
                     orig_sr=bp["sr"],
                     target_sr=sr,
-                    res_type="sinc_fastest",
+                    res_type="soxr_hq",
                 )
             else:  # mid
                 spec_s = fft_hp_filter(spec_s, bp["hpf_start"], bp["hpf_stop"] - 1)
@@ -424,7 +424,7 @@ def cmb_spectrogram_to_wave(spec_m, mp, extra_bins_h=None, extra_bins=None):
                     ),
                 )
                 # 🔥 修复: resample 必须指定 orig_sr, target_sr
-                wave = librosa.core.resample(wave2, orig_sr=bp["sr"], target_sr=sr, res_type="scipy")
+                wave = librosa.core.resample(wave2, orig_sr=bp["sr"], target_sr=sr, res_type="soxr_hq")
 
     return wave.T
 
